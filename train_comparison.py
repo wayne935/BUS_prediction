@@ -9,9 +9,16 @@ import math
 from tqdm import tqdm
 import copy
 
-# Configuration
-DATA_FILE = './Status_90.xlsx'
-SEQUENCE_LENGTH = 42
+# Configuration 主要要調的
+"""
+星期三
+100: SEQUENCE_LENGTH = 46, 總共訓練1-46班
+90: SEQUENCE_LENGTH = 27, 總共訓練1-72班
+609: SEQUENCE_LENGTH = 13, 總共訓練1-13班, k=30
+一班車一個模型
+"""
+DATA_FILE = './dataset/Status_100.xlsx'
+SEQUENCE_LENGTH = 46
 NUM_EPOCHS = 1000
 PATIENCE = 150
 BATCH_SIZE = 32
@@ -20,7 +27,7 @@ NUM_LAYERS = 3
 LEARNING_RATE = 0.001
 TRAIN_SPLIT_RATIO = 0.9
 K = 10
-TARGET_BUS = "第1班"
+TARGET_BUS = "第3班"
 DAY = "星期三"
 
 def get_bus_num(filename):
@@ -84,10 +91,10 @@ def load_and_process_data(file_path, target_bus):
 
         split_idx = int(len(unique_dates) * TRAIN_SPLIT_RATIO)
         train_dates = unique_dates[:split_idx]
-        test_dates = unique_dates[split_idx:]
+        #test_dates = unique_dates[split_idx:]
 
         train_sequences = []
-        test_sequences = []
+        #test_sequences = []
 
         grouped = df.groupby(['Date', 'Bus'])
         for (date, bus), group in grouped:
@@ -124,25 +131,16 @@ def load_and_process_data(file_path, target_bus):
                 else:
                     # Take last SEQUENCE_LENGTH
                     seq = history[-SEQUENCE_LENGTH:]
-                """
-                if date in train_dates:
-                    train_sequences.append((seq, target))
-                else:
-                    if len(test_sequences) < 2:     # 新增限制
-                        test_sequences.append((seq, target))
-                """
-
-                if date in train_dates:
-                    train_sequences.append((seq, target))
-                else:
-                    test_sequences.append((seq, target))
-
+             
+                train_sequences.append((seq, target))
+                
+        """
         if len(test_sequences) == 0:
           print("[Exception] No test sequences found in split. Taking last 2 train sequences.")
           if len(train_sequences) >= 2:
             test_sequences = train_sequences[-2:]
-
-        return train_sequences, test_sequences
+        """
+        return train_sequences
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         return [], []
@@ -267,13 +265,12 @@ class BertCustomModel(nn.Module):
         out = self.fc(last_token_state)
         return out
 
-def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS, learning_rate=LEARNING_RATE,patience=PATIENCE):
+def train_model(model, train_loader,device, num_epochs=NUM_EPOCHS, learning_rate=LEARNING_RATE,patience=PATIENCE):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     history = []
     best_acc = 0.0
-    best_loss = 0.0
     patience_counter = 0
     best_model_state = None
 
@@ -302,7 +299,7 @@ def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS,
 
         avg_train_loss = train_loss / len(train_loader)
         train_acc = 100 * correct / total
-
+        """
         # Validation
         model.eval()
         test_loss = 0.0
@@ -320,20 +317,20 @@ def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS,
 
         avg_test_loss = test_loss / len(test_loader)
         test_acc = 100 * correct / total
-
+        """
         history.append({
             'Epoch': epoch + 1,
             'Train Loss': avg_train_loss,
             'Train Acc': train_acc,
-            'Test Loss': avg_test_loss,
-            'Test Acc': test_acc
+            #'Test Loss': avg_test_loss,
+            #'Test Acc': test_acc
         })
 
         progress_bar.set_postfix({
             'Train Loss': f'{avg_train_loss:.4f}',
             'Train Acc': f'{train_acc:.2f}%',
-            'Test Loss': f'{avg_test_loss:.4f}',
-            'Test Acc': f'{test_acc:.2f}%'
+            #'Test Loss': f'{avg_test_loss:.4f}',
+            #'Test Acc': f'{test_acc:.2f}%'
         })
         """
         if avg_test_loss < best_loss :
@@ -362,8 +359,13 @@ def run_inference(model, data_loader, device):
     model.eval()
     all_results = []
     accuracy = 0.0
+    kacc = 0.0
+    ktotal = 0
+    kcorrect = 0
     total = 0
     correct = 0
+    pred_2_actual_0 = 0
+    pred_2_actual_1 = 0
 
     with torch.no_grad():
         for X_batch, y_batch in data_loader:
@@ -374,6 +376,15 @@ def run_inference(model, data_loader, device):
             _, predicted = torch.max(outputs, 1)
             total += y_batch.size(0)
             correct += (predicted == y_batch).sum().item()
+            mask = y_batch != 2
+            ktotal += mask.sum().item()
+            kcorrect += ((predicted == y_batch) & mask).sum().item()
+            # Calculate predictions of 2 where actual is 0 or 1
+            mask_pred_2 = predicted == 2
+            pred_2_actual_0 += (mask_pred_2 & (y_batch == 0)).sum().item()
+            pred_2_actual_1 += (mask_pred_2 & (y_batch == 1)).sum().item()
+            # Store results
+
 
             for i in range(len(predicted)):
                 all_results.append({
@@ -381,30 +392,29 @@ def run_inference(model, data_loader, device):
                     "Prediction": int(predicted[i].cpu().item()),
                     "Target": int(y_batch[i].cpu().item())
                 })
+        kacc = 100 * kcorrect / ktotal if ktotal > 0 else 0.0
         accuracy = 100 * correct / total
-    return all_results, accuracy
+
+    return all_results, accuracy, kacc, pred_2_actual_0, pred_2_actual_1
+
 def load_and_run_inference(model_path, model_class, device):
-    train_sequences, test_sequences = load_and_process_data(DATA_FILE, TARGET_BUS)
+    train_sequences = load_and_process_data(DATA_FILE, TARGET_BUS)
     train_dataset = BusDataset(train_sequences)
-    test_dataset = BusDataset(test_sequences)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     model = model_class(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3)
 
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
 
-    results, accuracy = run_inference(model, train_loader, device)
+    results, accuracy, kacc, p2a0, p2a1 = run_inference(model, train_loader, device)
     for i in range( len(results)):
         r = results[i]
         print(f"[{i}] Input={r['Input']}, Pred={r['Prediction']}, Target={r['Target']}")
     print(f"Accuracy:[{accuracy}]")
-    results, accuracy = run_inference(model, test_loader, device)
-    for i in range( len(results)):
-        r = results[i]
-        print(f"[{i}] Input={r['Input']}, Pred={r['Prediction']}, Target={r['Target']}")
-    print(f"Accuracy:[{accuracy}]")
+    print(f"K Accuracy:[{kacc}]")
+    print(f"Pred=2 Actual=0: {p2a0}")
+    print(f"Pred=2 Actual=1: {p2a1}")
 
     return None
 
@@ -415,20 +425,17 @@ def main():
     #preprocess_cluster_num(DATA_FILE, K)
     bus_num = get_bus_num(DATA_FILE)
     print(f"Bus number: {bus_num}")
-    train_sequences, test_sequences = load_and_process_data(DATA_FILE,TARGET_BUS)
+    train_sequences = load_and_process_data(DATA_FILE,TARGET_BUS)
     #train_sequences = load_and_process_data(DATA_FILE, TARGET_BUS)
     print(f"Train sequences: {len(train_sequences)}")
-    print(f"Test sequences: {len(test_sequences)}")
 
     if not train_sequences:
         print("No valid sequences found. Exiting.")
         return
 
     train_dataset = BusDataset(train_sequences)
-    test_dataset = BusDataset(test_sequences)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -457,7 +464,7 @@ def main():
 
     for name, model in models_schedule:
         print(f"\n>>> Training {name} Model <<<")
-        history, best_model= train_model(model, train_loader,test_loader,  device)
+        history, best_model= train_model(model, train_loader, device)
 
         # Save individual model
         model_filename = f'{name.lower()}_{bus_num}_0_{DAY}_{TARGET_BUS}.pth'
@@ -471,7 +478,7 @@ def main():
         print(f"Training history saved to {result_filename}")
 
         # --- After training, run inference on train set ---
-        load_and_run_inference(f'./gru_{bus_num}_0_星期三_{TARGET_BUS}.pth',GRUModel, device="cpu")
+        #load_and_run_inference(f'./gru_{bus_num}_0_星期三_{TARGET_BUS}.pth',GRUModel, device="cpu")
         """
         for i in range( len(train_results)):
             r = train_results[i]
