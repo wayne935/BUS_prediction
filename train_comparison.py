@@ -10,17 +10,17 @@ from tqdm import tqdm
 import copy
 
 # Configuration
-DATA_FILE = './Status_100.xlsx'
-SEQUENCE_LENGTH = 15
+DATA_FILE = './Status_90.xlsx'
+SEQUENCE_LENGTH = 42
+NUM_EPOCHS = 1000
+PATIENCE = 150
 BATCH_SIZE = 32
 HIDDEN_SIZE = 256
 NUM_LAYERS = 3
 LEARNING_RATE = 0.001
-NUM_EPOCHS = 800
-TRAIN_SPLIT_RATIO = 0.95
+TRAIN_SPLIT_RATIO = 0.9
 K = 10
-PATIENCE = 250
-TARGET_BUS = "第11班"
+TARGET_BUS = "第1班"
 DAY = "星期三"
 
 def get_bus_num(filename):
@@ -96,7 +96,17 @@ def load_and_process_data(file_path, target_bus):
             # Map 1 -> 0, 2 -> 1
             status_values = group['Status'].values
             status_values = np.where(status_values == 1, 0, 1)
+            k1 = group['kmeans1'].values
+            k2 = group['kmeans2'].values
 
+            # 建立副本避免 overwrite
+            new_status = status_values.copy()
+
+            # 差異 < 10 的地方設為 2
+            mask = np.abs(k1 - k2) < 10
+            new_status[mask] = 2
+
+            status_values = new_status
             # Generate sequences: [Pad, ..., S1] -> S2, [Pad, ..., S1, S2] -> S3
             # We need at least 2 data points to predict something (Input S1 -> Target S2)
             if len(status_values) < 2:
@@ -127,6 +137,11 @@ def load_and_process_data(file_path, target_bus):
                 else:
                     test_sequences.append((seq, target))
 
+        if len(test_sequences) == 0:
+          print("[Exception] No test sequences found in split. Taking last 2 train sequences.")
+          if len(train_sequences) >= 2:
+            test_sequences = train_sequences[-2:]
+
         return train_sequences, test_sequences
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
@@ -152,7 +167,7 @@ class BusDataset(Dataset):
 # --- Models ---
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=2):
+    def __init__(self, input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3):
         super(LSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -168,7 +183,7 @@ class LSTMModel(nn.Module):
         return out
 
 class GRUModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=2):
+    def __init__(self, input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3):
         super(GRUModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -182,7 +197,7 @@ class GRUModel(nn.Module):
         return out
 
 class RNNModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=128, num_layers=3, output_size=2):
+    def __init__(self, input_size=1, hidden_size=128, num_layers=3, output_size=3):
         super(RNNModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -210,7 +225,7 @@ class PositionalEncoding(nn.Module):
         return x
 
 class TransformerModel(nn.Module):
-    def __init__(self, input_size=1, d_model=64, nhead=4, num_layers=3, output_size=2, dropout=0.1):
+    def __init__(self, input_size=1, d_model=64, nhead=4, num_layers=3, output_size=3, dropout=0.1):
         super(TransformerModel, self).__init__()
         self.input_embedding = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
@@ -230,7 +245,7 @@ class TransformerModel(nn.Module):
 from transformers import BertModel, BertConfig
 
 class BertCustomModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=256, num_layers=3, num_heads=4, output_size=2):
+    def __init__(self, input_size=1, hidden_size=256, num_layers=3, num_heads=4, output_size=3):
         super(BertCustomModel, self).__init__()
         config = BertConfig(
             hidden_size=hidden_size,
@@ -252,7 +267,7 @@ class BertCustomModel(nn.Module):
         out = self.fc(last_token_state)
         return out
 
-def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS, learning_rate=LEARNING_RATE,patience=PATIENCE, min_delta=MIN_DELTA):
+def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS, learning_rate=LEARNING_RATE,patience=PATIENCE):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -331,8 +346,8 @@ def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS,
                 print(f"\nEarly stopping triggered for {model.__class__.__name__} at epoch {epoch + 1} due to no improvement in ACC.")
                 break
         """
-        if test_acc > best_acc :
-            best_acc = test_acc
+        if train_acc >= best_acc :
+            best_acc = train_acc
             patience_counter = 0
             best_model_state = copy.deepcopy(model.state_dict())
         else:
@@ -343,11 +358,61 @@ def train_model(model, train_loader,test_loader,  device, num_epochs=NUM_EPOCHS,
 
     return history, best_model_state
 
+def run_inference(model, data_loader, device):
+    model.eval()
+    all_results = []
+    accuracy = 0.0
+    total = 0
+    correct = 0
+
+    with torch.no_grad():
+        for X_batch, y_batch in data_loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            outputs = model(X_batch)
+            _, predicted = torch.max(outputs, 1)
+            total += y_batch.size(0)
+            correct += (predicted == y_batch).sum().item()
+
+            for i in range(len(predicted)):
+                all_results.append({
+                    "Input": X_batch[i].cpu().numpy().flatten().tolist(),
+                    "Prediction": int(predicted[i].cpu().item()),
+                    "Target": int(y_batch[i].cpu().item())
+                })
+        accuracy = 100 * correct / total
+    return all_results, accuracy
+def load_and_run_inference(model_path, model_class, device):
+    train_sequences, test_sequences = load_and_process_data(DATA_FILE, TARGET_BUS)
+    train_dataset = BusDataset(train_sequences)
+    test_dataset = BusDataset(test_sequences)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    model = model_class(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3)
+
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+
+    results, accuracy = run_inference(model, train_loader, device)
+    for i in range( len(results)):
+        r = results[i]
+        print(f"[{i}] Input={r['Input']}, Pred={r['Prediction']}, Target={r['Target']}")
+    print(f"Accuracy:[{accuracy}]")
+    results, accuracy = run_inference(model, test_loader, device)
+    for i in range( len(results)):
+        r = results[i]
+        print(f"[{i}] Input={r['Input']}, Pred={r['Prediction']}, Target={r['Target']}")
+    print(f"Accuracy:[{accuracy}]")
+
+    return None
+
 def main():
     if not os.path.exists(DATA_FILE):
         print(f"Error: Data file not found at {DATA_FILE}")
         return
-    preprocess_cluster_num(DATA_FILE, K)
+    #preprocess_cluster_num(DATA_FILE, K)
     bus_num = get_bus_num(DATA_FILE)
     print(f"Bus number: {bus_num}")
     train_sequences, test_sequences = load_and_process_data(DATA_FILE,TARGET_BUS)
@@ -374,14 +439,14 @@ def main():
     print(f"Using device: {device}")
 
     # Initialize Models
-    #lstm_model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=2).to(device)
-    gru_model = GRUModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=2).to(device)
-    #GRU表現比較好
-    #transformer_model = TransformerModel(input_size=1, d_model=64, nhead=4, num_layers=NUM_LAYERS, output_size=2).to(device)
-    #bert_model = BertCustomModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, num_heads=4, output_size=2).to(device)
-    #rnn_model = RNNModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=2).to(device)
+    lstm_model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
+    gru_model = GRUModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
+    #GRU LSTM表現比較好
+    #transformer_model = TransformerModel(input_size=1, d_model=64, nhead=4, num_layers=NUM_LAYERS, output_size=3).to(device)
+    #bert_model = BertCustomModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, num_heads=4, output_size=3).to(device)
+    #rnn_model = RNNModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
     models_schedule = [
-        #("LSTM", lstm_model),
+        ("LSTM", lstm_model),
         ("GRU", gru_model),
         #("RNN", rnn_model),
         #("Transformer", transformer_model),
@@ -404,6 +469,14 @@ def main():
         df_history = pd.DataFrame(history)
         df_history.to_excel(result_filename, index=False)
         print(f"Training history saved to {result_filename}")
+
+        # --- After training, run inference on train set ---
+        load_and_run_inference(f'./gru_{bus_num}_0_星期三_{TARGET_BUS}.pth',GRUModel, device="cpu")
+        """
+        for i in range( len(train_results)):
+            r = train_results[i]
+            print(f"[{i}] Input={r['Input']}, Pred={r['Prediction']}, Target={r['Target']}")
+        """
 
     print("\nAll models trained and saved.")
 
