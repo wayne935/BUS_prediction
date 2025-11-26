@@ -11,7 +11,7 @@ import copy
 
 # Configuration 主要要調的
 """
-星期三
+先做星期三
 100: SEQUENCE_LENGTH = 46, 總共訓練1-46班
 90: SEQUENCE_LENGTH = 27, 總共訓練1-72班
 609: SEQUENCE_LENGTH = 13, 總共訓練1-13班, k=30
@@ -28,7 +28,7 @@ NUM_LAYERS = 3
 LEARNING_RATE = 0.001
 TRAIN_SPLIT_RATIO = 0.9
 K = 10
-TARGET_BUS = "第3班"
+TARGET_BUS = "第3班"#改這個
 DAY = "星期三"
 
 def get_bus_num(filename):
@@ -333,17 +333,7 @@ def train_model(model, train_loader,device, num_epochs=NUM_EPOCHS, learning_rate
             #'Test Loss': f'{avg_test_loss:.4f}',
             #'Test Acc': f'{test_acc:.2f}%'
         })
-        """
-        if avg_test_loss < best_loss :
-            best_loss = avg_test_loss
-            patience_counter = 0
-            best_model_state = copy.deepcopy(model.state_dict())
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"\nEarly stopping triggered for {model.__class__.__name__} at epoch {epoch + 1} due to no improvement in ACC.")
-                break
-        """
+
         if train_acc >= best_acc :
             best_acc = train_acc
             patience_counter = 0
@@ -477,14 +467,6 @@ def main():
         df_history = pd.DataFrame(history)
         df_history.to_excel(result_filename, index=False)
         print(f"Training history saved to {result_filename}")
-
-        # --- After training, run inference on train set ---
-        #load_and_run_inference(f'./gru_{bus_num}_0_星期三_{TARGET_BUS}.pth',GRUModel, device="cpu")
-        """
-        for i in range( len(train_results)):
-            r = train_results[i]
-            print(f"[{i}] Input={r['Input']}, Pred={r['Prediction']}, Target={r['Target']}")
-        """
 
     print("\nAll models trained and saved.")
 
