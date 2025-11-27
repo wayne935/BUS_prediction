@@ -12,14 +12,14 @@ import copy
 # Configuration 主要要調的
 """
 先做星期三
-100: SEQUENCE_LENGTH = 46, 總共訓練1-46班
+100: SEQUENCE_LENGTH = 42, 總共訓練1-46班
 90: SEQUENCE_LENGTH = 27, 總共訓練1-72班
-609: SEQUENCE_LENGTH = 13, 總共訓練1-13班, k=30
+609: SEQUENCE_LENGTH = 4, 總共訓練1-13班, k=30
 一班車一個模型
 """
 
-DATA_FILE = './dataset/Status_100.xlsx'
-SEQUENCE_LENGTH = 46
+DATA_FILE = './dataset/Status_609.xlsx'
+SEQUENCE_LENGTH = 4
 NUM_EPOCHS = 1000
 PATIENCE = 150
 BATCH_SIZE = 32
@@ -28,7 +28,7 @@ NUM_LAYERS = 3
 LEARNING_RATE = 0.001
 TRAIN_SPLIT_RATIO = 0.9
 K = 10
-TARGET_BUS = "第3班"#改這個
+TARGET_BUS = "第1班"#改這個
 DAY = "星期三"
 
 def get_bus_num(filename):
@@ -407,7 +407,7 @@ def load_and_run_inference(model_path, model_class, device):
     print(f"Pred=2 Actual=0: {p2a0}")
     print(f"Pred=2 Actual=1: {p2a1}")
 
-    return None
+    return p2a0, p2a1
 
 def main():
     if not os.path.exists(DATA_FILE):
@@ -437,14 +437,14 @@ def main():
     print(f"Using device: {device}")
 
     # Initialize Models
-    lstm_model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
+    #lstm_model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
     gru_model = GRUModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
     #GRU LSTM表現比較好
     #transformer_model = TransformerModel(input_size=1, d_model=64, nhead=4, num_layers=NUM_LAYERS, output_size=3).to(device)
     #bert_model = BertCustomModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, num_heads=4, output_size=3).to(device)
     #rnn_model = RNNModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
     models_schedule = [
-        ("LSTM", lstm_model),
+        #("LSTM", lstm_model),
         ("GRU", gru_model),
         #("RNN", rnn_model),
         #("Transformer", transformer_model),
