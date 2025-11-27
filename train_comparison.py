@@ -1,5 +1,7 @@
 import os
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,6 +10,8 @@ import re
 import math
 from tqdm import tqdm
 import copy
+import glob
+import time
 
 # Configuration 主要要調的
 """
@@ -22,7 +26,7 @@ DATA_FILE = './dataset/Status_609.xlsx'
 SEQUENCE_LENGTH = 4
 NUM_EPOCHS = 1000
 PATIENCE = 150
-BATCH_SIZE = 32
+BATCH_SIZE = 2048
 HIDDEN_SIZE = 256
 NUM_LAYERS = 3
 LEARNING_RATE = 0.001
@@ -30,6 +34,63 @@ TRAIN_SPLIT_RATIO = 0.9
 K = 10
 TARGET_BUS = "第1班"#改這個
 DAY = "星期三"
+
+def plot_history(output_path='model_comparison_plot.png'):
+    # Find all result_*.xlsx files
+    result_files = glob.glob('result_*.xlsx')
+    
+    if not result_files:
+        print("Error: No result_*.xlsx files found.")
+        return
+
+    print(f"Found {len(result_files)} result files: {result_files}")
+
+    # Combine all results into a single DataFrame
+    all_data = []
+    for file in result_files:
+        try:
+            # Extract model name from filename (e.g., result_LSTM.xlsx -> LSTM)
+            model_name = file.replace('result_', '').replace('.xlsx', '')
+            
+            df = pd.read_excel(file)
+            df['Model'] = model_name
+            all_data.append(df)
+        except Exception as e:
+            print(f"Error reading {file}: {e}")
+    
+    if not all_data:
+        print("Error: No valid data found in result files.")
+        return
+    
+    # Combine all DataFrames
+    df = pd.concat(all_data, ignore_index=True)
+    
+    # Set style
+    sns.set(style="whitegrid")
+    
+    # Create figure with 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('Model Comparison History', fontsize=16)
+
+    # Metrics to plot
+    metrics = [
+        ('Train Loss', axes[0, 0]),
+        ('Train Acc', axes[0, 1]),
+        ('Test Loss', axes[1, 0]),
+        ('Test Acc', axes[1, 1])
+    ]
+
+    # Plot each metric
+    for metric, ax in metrics:
+        sns.lineplot(data=df, x='Epoch', y=metric, hue='Model', ax=ax, marker='o', markersize=4)
+        ax.set_title(metric)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel(metric)
+        # ax.legend(title='Model')
+
+    plt.tight_layout()
+    plt.savefig(output_path)
+    print(f"Plot saved to {output_path}")
 
 def get_bus_num(filename):
     match = re.search(r'(\d+)', filename)
@@ -65,39 +126,36 @@ def preprocess_cluster_num(file_path, k):
       print(f"Error reading {file_path}: {e}")
       return
 
-def load_and_process_data(file_path, target_bus):
-    print(f"Processing {file_path}...")
+def load_and_parse_full_dataset(file_path):
+    print(f"Loading and parsing full dataset: {file_path} ...")
     try:
         df = pd.read_excel(file_path)
-
+        
         parsed_data = df['Index'].apply(parse_index)
         df['Date'] = [x[0] for x in parsed_data]
         df['Bus'] = [x[1] for x in parsed_data]
         df['Station'] = [x[2] for x in parsed_data]
 
         df = df.dropna(subset=['Date', 'Bus', 'Station'])
-        if df.empty:
-            print("DataFrame is empty after dropping NAs. Cannot proceed.")
-            return [], []
-
         # Sort by Date to ensure time-based splitting works correctly later
         df = df.sort_values('Date')
-        df = df[df['Bus'] == target_bus].copy() # Filter rows where 'Bus' is '第1班'
+        print("Dataset loaded and parsed successfully.")
+        return df
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return None
 
-        if df.empty:
-            print(f"DataFrame is empty after filtering for Bus='{target_bus}'. Cannot proceed.")
-            return [], []
+def process_data_from_df(df, target_bus, sequence_length, k_value):
+    try:
+        # Filter from the already loaded dataframe
+        df_bus = df[df['Bus'] == target_bus].copy() 
 
-        unique_dates = df['Date'].unique()
-
-        split_idx = int(len(unique_dates) * TRAIN_SPLIT_RATIO)
-        train_dates = unique_dates[:split_idx]
-        #test_dates = unique_dates[split_idx:]
+        if df_bus.empty:
+            return []
 
         train_sequences = []
-        #test_sequences = []
 
-        grouped = df.groupby(['Date', 'Bus'])
+        grouped = df_bus.groupby(['Date', 'Bus'])
         for (date, bus), group in grouped:
             group = group.sort_values('Station')
 
@@ -110,13 +168,12 @@ def load_and_process_data(file_path, target_bus):
             # 建立副本避免 overwrite
             new_status = status_values.copy()
 
-            # 差異 < 10 的地方設為 2
-            mask = np.abs(k1 - k2) < 10
+            # 差異 < k_value 的地方設為 2
+            mask = np.abs(k1 - k2) < k_value
             new_status[mask] = 2
 
             status_values = new_status
-            # Generate sequences: [Pad, ..., S1] -> S2, [Pad, ..., S1, S2] -> S3
-            # We need at least 2 data points to predict something (Input S1 -> Target S2)
+            
             if len(status_values) < 2:
                 continue
 
@@ -124,30 +181,30 @@ def load_and_process_data(file_path, target_bus):
                 target = status_values[i]
                 history = status_values[:i]
 
-                # Pad or truncate history to SEQUENCE_LENGTH
-                if len(history) < SEQUENCE_LENGTH:
+                # Pad or truncate history to sequence_length
+                if len(history) < sequence_length:
                     # Pad with -1 on the left
-                    padding = np.full(SEQUENCE_LENGTH - len(history), -1)
+                    padding = np.full(sequence_length - len(history), -1)
                     seq = np.concatenate((padding, history))
                 else:
-                    # Take last SEQUENCE_LENGTH
-                    seq = history[-SEQUENCE_LENGTH:]
+                    # Take last sequence_length
+                    seq = history[-sequence_length:]
              
                 train_sequences.append((seq, target))
                 
-        """
-        if len(test_sequences) == 0:
-          print("[Exception] No test sequences found in split. Taking last 2 train sequences.")
-          if len(train_sequences) >= 2:
-            test_sequences = train_sequences[-2:]
-        """
         return train_sequences
     except Exception as e:
-        print(f"Error processing {file_path}: {e}")
-        return [], []
+        print(f"Error processing data for {target_bus}: {e}")
+        return []
+
+def load_and_process_data(file_path, target_bus, sequence_length, k_value):
+    # Wrapper for backward compatibility if needed, but main will use the new functions
+    df = load_and_parse_full_dataset(file_path)
+    if df is None: return []
+    return process_data_from_df(df, target_bus, sequence_length, k_value)
 
 class BusDataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, device):
         self.X = []
         self.y = []
 
@@ -155,8 +212,8 @@ class BusDataset(Dataset):
             self.X.append(seq)
             self.y.append(target)
 
-        self.X = torch.tensor(np.array(self.X), dtype=torch.float32).unsqueeze(-1) # (N, L, 1)
-        self.y = torch.tensor(np.array(self.y), dtype=torch.long) # (N)
+        self.X = torch.tensor(np.array(self.X), dtype=torch.float32).unsqueeze(-1).to(device) # (N, L, 1)
+        self.y = torch.tensor(np.array(self.y), dtype=torch.long).to(device) # (N)
 
     def __len__(self):
         return len(self.X)
@@ -269,30 +326,40 @@ class BertCustomModel(nn.Module):
 def train_model(model, train_loader,device, num_epochs=NUM_EPOCHS, learning_rate=LEARNING_RATE,patience=PATIENCE):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=0.01, 
+        steps_per_epoch=len(train_loader), 
+        epochs=num_epochs
+    )
 
     history = []
     best_acc = 0.0
     patience_counter = 0
     best_model_state = None
 
-    print(f"Training {model.__class__.__name__} with early stopping (patience={patience}...")
+    print(f"Training {model.__class__.__name__} (Patience={patience})...")
+    
+    start_time = time.time()
 
-    progress_bar = tqdm(range(num_epochs), desc=f"Training {model.__class__.__name__}")
-
-    for epoch in progress_bar:
+    for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
         correct = 0
         total = 0
 
         for X_batch, y_batch in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            # Data is already on device
+            # X_batch, y_batch = X_batch.to(device), y_batch.to(device)
 
             optimizer.zero_grad()
             outputs = model(X_batch)
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
+            scheduler.step()
+
             train_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
             total += y_batch.size(0)
@@ -300,39 +367,15 @@ def train_model(model, train_loader,device, num_epochs=NUM_EPOCHS, learning_rate
 
         avg_train_loss = train_loss / len(train_loader)
         train_acc = 100 * correct / total
-        """
-        # Validation
-        model.eval()
-        test_loss = 0.0
-        correct = 0
-        total = 0
-        with torch.no_grad():
-            for X_batch, y_batch in test_loader:
-                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-                outputs = model(X_batch)
-                loss = criterion(outputs, y_batch)
-                test_loss += loss.item()
-                _, predicted = torch.max(outputs.data, 1)
-                total += y_batch.size(0)
-                correct += (predicted == y_batch).sum().item()
-
-        avg_test_loss = test_loss / len(test_loader)
-        test_acc = 100 * correct / total
-        """
+        
         history.append({
             'Epoch': epoch + 1,
             'Train Loss': avg_train_loss,
             'Train Acc': train_acc,
-            #'Test Loss': avg_test_loss,
-            #'Test Acc': test_acc
         })
 
-        progress_bar.set_postfix({
-            'Train Loss': f'{avg_train_loss:.4f}',
-            'Train Acc': f'{train_acc:.2f}%',
-            #'Test Loss': f'{avg_test_loss:.4f}',
-            #'Test Acc': f'{test_acc:.2f}%'
-        })
+        if (epoch + 1) % 50 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {avg_train_loss:.4f} Acc: {train_acc:.2f}%")
 
         if train_acc >= best_acc :
             best_acc = train_acc
@@ -341,8 +384,11 @@ def train_model(model, train_loader,device, num_epochs=NUM_EPOCHS, learning_rate
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"\nEarly stopping triggered for {model.__class__.__name__} at epoch {epoch + 1} due to no improvement in ACC.")
+                print(f"Early stopping at epoch {epoch + 1}. Best Acc: {best_acc:.2f}%")
                 break
+    
+    end_time = time.time()
+    print(f"Training finished in {end_time - start_time:.2f}s. Best Acc: {best_acc:.2f}%")
 
     return history, best_model_state
 
@@ -360,8 +406,9 @@ def run_inference(model, data_loader, device):
 
     with torch.no_grad():
         for X_batch, y_batch in data_loader:
-            X_batch = X_batch.to(device)
-            y_batch = y_batch.to(device)
+            # Data is already on device
+            # X_batch = X_batch.to(device)
+            # y_batch = y_batch.to(device)
 
             outputs = model(X_batch)
             _, predicted = torch.max(outputs, 1)
@@ -389,8 +436,8 @@ def run_inference(model, data_loader, device):
     return all_results, accuracy, kacc, pred_2_actual_0, pred_2_actual_1
 
 def load_and_run_inference(model_path, model_class, device):
-    train_sequences = load_and_process_data(DATA_FILE, TARGET_BUS)
-    train_dataset = BusDataset(train_sequences)
+    train_sequences = load_and_process_data(DATA_FILE, TARGET_BUS, SEQUENCE_LENGTH, K)
+    train_dataset = BusDataset(train_sequences, device)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     model = model_class(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3)
@@ -410,23 +457,26 @@ def load_and_run_inference(model_path, model_class, device):
     return p2a0, p2a1
 
 def main():
-    if not os.path.exists(DATA_FILE):
-        print(f"Error: Data file not found at {DATA_FILE}")
-        return
-    #preprocess_cluster_num(DATA_FILE, K)
-    bus_num = get_bus_num(DATA_FILE)
-    print(f"Bus number: {bus_num}")
-    train_sequences = load_and_process_data(DATA_FILE,TARGET_BUS)
-    #train_sequences = load_and_process_data(DATA_FILE, TARGET_BUS)
-    print(f"Train sequences: {len(train_sequences)}")
-
-    if not train_sequences:
-        print("No valid sequences found. Exiting.")
-        return
-
-    train_dataset = BusDataset(train_sequences)
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    configs = [
+        {
+            "file": "./dataset/Status_100.xlsx",
+            "seq_len": 42,
+            "bus_range": range(1, 47), # 1-46
+            "k": 10
+        },
+        {
+            "file": "./dataset/Status_90.xlsx",
+            "seq_len": 27,
+            "bus_range": range(1, 73), # 1-72
+            "k": 10
+        },
+        {
+            "file": "./dataset/Status_609.xlsx",
+            "seq_len": 4,
+            "bus_range": range(1, 14), # 1-13
+            "k": 30
+        }
+    ]
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -436,39 +486,71 @@ def main():
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    # Initialize Models
-    #lstm_model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
-    gru_model = GRUModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
-    #GRU LSTM表現比較好
-    #transformer_model = TransformerModel(input_size=1, d_model=64, nhead=4, num_layers=NUM_LAYERS, output_size=3).to(device)
-    #bert_model = BertCustomModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, num_heads=4, output_size=3).to(device)
-    #rnn_model = RNNModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
-    models_schedule = [
-        #("LSTM", lstm_model),
-        ("GRU", gru_model),
-        #("RNN", rnn_model),
-        #("Transformer", transformer_model),
-        #("BERT", bert_model)
-    ]
+    for config in configs:
+        data_file = config["file"]
+        seq_len = config["seq_len"]
+        bus_range = config["bus_range"]
+        k_val = config["k"]
+        
+        if not os.path.exists(data_file):
+            print(f"Skipping {data_file}, not found.")
+            continue
+            
+        bus_num_from_file = get_bus_num(data_file)
+        
+        # Load dataset once per file
+        full_dataset_df = load_and_parse_full_dataset(data_file)
+        if full_dataset_df is None:
+            continue
 
-    print("\n--- Starting Sequential Training ---")
+        for bus_idx in bus_range:
+            target_bus = f"第{bus_idx}班"
+            print(f"\nProcessing {data_file}, Bus: {target_bus}, Seq: {seq_len}, K: {k_val}")
+            
+            # Use in-memory dataframe
+            train_sequences = process_data_from_df(full_dataset_df, target_bus, seq_len, k_val)
+            
+            if not train_sequences:
+                print(f"No valid sequences found for {target_bus}. Skipping.")
+                continue
 
-    for name, model in models_schedule:
-        print(f"\n>>> Training {name} Model <<<")
-        history, best_model= train_model(model, train_loader, device)
+            train_dataset = BusDataset(train_sequences, device)
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
 
-        # Save individual model
-        model_filename = f'{name.lower()}_{bus_num}_0_{DAY}_{TARGET_BUS}.pth'
-        torch.save(best_model, model_filename)
-        print(f"{name} model saved to {model_filename}")
+            # Initialize Models
+            #lstm_model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
+            gru_model = GRUModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
+            #GRU LSTM表現比較好
+            #transformer_model = TransformerModel(input_size=1, d_model=64, nhead=4, num_layers=NUM_LAYERS, output_size=3).to(device)
+            #bert_model = BertCustomModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, num_heads=4, output_size=3).to(device)
+            #rnn_model = RNNModel(input_size=1, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=3).to(device)
+            models_schedule = [
+                #("LSTM", lstm_model),
+                ("GRU", gru_model),
+                #("RNN", rnn_model),
+                #("Transformer", transformer_model),
+                #("BERT", bert_model)
+            ]
 
-        # Save result to Excel
-        result_filename = f'result_{name}.xlsx'
-        df_history = pd.DataFrame(history)
-        df_history.to_excel(result_filename, index=False)
-        print(f"Training history saved to {result_filename}")
+            print(f"--- Starting Training for {target_bus} ---")
+
+            for name, model in models_schedule:
+                print(f">>> Training {name} Model <<<")
+                history, best_model= train_model(model, train_loader, device)
+
+                # Save individual model
+                model_filename = f'{name.lower()}_{bus_num_from_file}_{bus_idx}_{DAY}_{target_bus}.pth'
+                torch.save(best_model, model_filename)
+                print(f"{name} model saved to {model_filename}")
+
+                # Save result to Excel
+                result_filename = f'result_{name}_{bus_num_from_file}_{target_bus}.xlsx'
+                df_history = pd.DataFrame(history)
+                df_history.to_excel(result_filename, index=False)
+                print(f"Training history saved to {result_filename}")
 
     print("\nAll models trained and saved.")
+    plot_history()
 
 if __name__ == "__main__":
     main()
